@@ -90,7 +90,7 @@ The `notebook-implementation` branch contains Fabric Git Integration exports:
 
 | Requirement | Details |
 |---|---|
-| **Fabric workspace** | With F64 or higher capacity attached |
+| **Fabric workspace** | With Fabric capacity attached (F2 or higher; trial capacity also works) |
 | **Fabric Lakehouse** | Created during setup or imported via Git Integration |
 | **ServiceNow instance** | Developer or production instance with REST API access |
 | **ServiceNow auth** | Service account with Basic authentication |
@@ -113,7 +113,7 @@ The `notebook-implementation` branch contains Fabric Git Integration exports:
 
 1. Go to [app.fabric.microsoft.com](https://app.fabric.microsoft.com) → **Workspaces** → **+ New workspace**
 2. Name it (e.g., `ServiceNow-Notebook-Ingestion`)
-3. Assign a Fabric capacity (F64 or higher)
+3. Assign a Fabric capacity (F2 or higher; trial capacity also works)
 4. Inside the workspace, click **+ New item** → **Lakehouse** → name it `servicenow_data`
 
 ### Step 2: Create the watermark notebook
@@ -132,7 +132,9 @@ The notebook derives the watermark from the data table itself — no separate tr
 table_name = "incident"
 ```
 
-> **Note:** When triggered by the pipeline, `table_name` is automatically set to the current table from the ForEach loop.
+> **Note:** When triggered by the pipeline, `table_name` is overridden by the Notebook activity's base parameter (`@item().tableName`). The `"incident"` default here is used when running the notebook interactively for testing.
+>
+> **If you import via Git Integration:** The exported pipeline JSON does not include the notebook base parameter mapping. After import, open the Notebook activity → **Settings** → **Base parameters** and add: Name = `table_name`, Type = String, Value = `@item().tableName`.
 
 #### Cell 2 — Read watermark and output to pipeline
 
@@ -142,7 +144,7 @@ from datetime import datetime, timedelta
 try:
     df = spark.sql(f"SELECT MAX(sys_updated_on) AS watermark FROM servicenow_data.{table_name}")
     watermark = df.collect()[0]["watermark"]
-except:
+except Exception:
     watermark = None
 
 if watermark is None:
@@ -218,9 +220,11 @@ mssparkutils.notebook.exit(str(watermark))
 |---|---|
 | **Connection name** | `ServiceNow-Connection` |
 | **Server URL** | `https://<your-instance>.service-now.com` |
-| **Authentication** | Basic |
+| **Authentication** | Basic (or OAuth 2.0 if supported by your instance) |
 | **Username** | Your ServiceNow service account |
 | **Password** | Service account password |
+
+> **Security best practice:** Avoid storing credentials directly. If your Fabric workspace supports it, use **Azure Key Vault** to store the ServiceNow password and reference it in the connection. For production workloads, prefer **OAuth 2.0** authentication over Basic auth when your ServiceNow instance supports it.
 
 ### Step 5: Test
 
@@ -246,7 +250,16 @@ No seeding needed — the notebook auto-detects if the table exists. If it doesn
 ]
 ```
 
-### 2. Run
+### 2. Update the Copy Activity source table
+
+The exported pipeline has the source table hardcoded to `incident`. For multi-table support, you need to parameterize the source:
+
+1. Open the Copy Activity → **Source** tab
+2. Switch the table selection to use dynamic content: `@item().tableName`
+
+> **Note:** Depending on your ServiceNow connector version, you may need to edit the pipeline JSON directly to replace the hardcoded `"tableName": "incident"` with `"tableName": "@{item().tableName}"`.
+
+### 3. Run
 
 The ForEach executes all tables in parallel by default. Each table runs its own Notebook → Copy Activity chain independently.
 
