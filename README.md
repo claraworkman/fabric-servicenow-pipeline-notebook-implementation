@@ -47,6 +47,8 @@ flowchart TB
 
 ### Pipeline Flow (per table, inside ForEach)
 
+![ForEach pipeline flow — watermark check (Notebook) → copy servicenow tables (Copy Activity)](images/pipeline2.png)
+
 | Step | Activity | What It Does |
 |---|---|---|
 | 1 | **watermark check** (Notebook) | Reads `MAX(sys_updated_on)` from the Lakehouse data table, outputs the watermark value via `mssparkutils.notebook.exit()` |
