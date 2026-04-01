@@ -1,8 +1,8 @@
 # ServiceNow → Microsoft Fabric Incremental Ingestion Pipeline (Notebook + Copy Activity)
 
-Incremental ingestion from ServiceNow into a Fabric Lakehouse using a **hybrid Notebook + Copy Activity** pattern. A PySpark Notebook reads and updates watermarks in a Lakehouse Delta table, and a native Copy Activity moves data from ServiceNow with upsert into the Lakehouse.
+Incremental ingestion from ServiceNow into a Fabric Lakehouse using a **hybrid Notebook + Copy Activity** pattern. A PySpark notebook reads the maximum `sys_updated_on` timestamp directly from the Lakehouse data table and passes it to a Copy Activity, which pulls only new/changed records from ServiceNow.
 
-**Notebook for watermark logic. Copy Activity for data movement. No SQL Database required. Two activities per table.**
+**Notebook for watermark logic. Copy Activity for data movement. No SQL Database required. No separate watermark table. Two activities per table.**
 
 ---
 
@@ -13,15 +13,15 @@ flowchart TB
     subgraph Workspace["Fabric Workspace"]
         direction TB
         
-        subgraph Pipeline["Data Pipeline: ServiceNow-Notebook-Ingestion"]
-            Param["Parameter: tables<br/>[incident, change_request, ...]"]
+        subgraph Pipeline["Data Pipeline: USECASE-2-ServiceNow-Notebook-Ingestion"]
+            Param["Parameter: tables<br/>[{tableName: incident}, ...]"]
             
             subgraph ForEach["ForEach: loop through tables"]
                 direction LR
                 
-                NB["📓 Notebook Activity<br/>watermark check<br/>──────────<br/>Reads watermark from<br/>Lakehouse Delta table<br/>Outputs: watermark value"]
+                NB["📓 Notebook Activity<br/>watermark check<br/>──────────<br/>Reads MAX(sys_updated_on)<br/>from Lakehouse data table<br/>Adds +1s offset<br/>Outputs: watermark value"]
                 
-                Copy["📦 Copy Activity<br/>copy servicenow tables<br/>──────────<br/>Source: ServiceNow V2<br/>Filter: sys_updated_on &gt; watermark<br/>Sink: Lakehouse Upsert<br/>Key: sys_id"]
+                Copy["📦 Copy Activity<br/>copy servicenow tables<br/>──────────<br/>Source: ServiceNow V2<br/>Filter: sys_updated_on ≥ watermark<br/>Sink: Lakehouse Upsert<br/>Key: sys_id"]
                 
                 NB -->|"Succeeded"| Copy
             end
@@ -29,12 +29,12 @@ flowchart TB
             Param --> ForEach
         end
         
-        LH[("Lakehouse<br/>servicenow_data")]
+        LH[("Lakehouse<br/>servicenow_lakehouse_notebook<br/>_incremental_refresh_use_case")]
     end
     
     SN["☁️ ServiceNow<br/>REST API"]
     
-    NB -.->|"read/write watermark"| LH
+    NB -.->|"read MAX(sys_updated_on)"| LH
     SN -.->|"filtered rows"| Copy
     Copy -.->|"upsert on sys_id"| LH
 
@@ -47,10 +47,12 @@ flowchart TB
 
 ### Pipeline Flow (per table, inside ForEach)
 
-| Step | Activity | Duration | What It Does |
-|---|---|---|---|
-| 1 | **watermark check** (Notebook) | ~58s | Reads last watermark from Lakehouse Delta table, outputs value for Copy Activity |
-| 2 | **copy servicenow tables** (Copy Activity) | ~35s | Copies rows from ServiceNow where `sys_updated_on > watermark`, upserts into Lakehouse on `sys_id` |
+| Step | Activity | What It Does |
+|---|---|---|
+| 1 | **watermark check** (Notebook) | Reads `MAX(sys_updated_on)` from the Lakehouse data table, adds +1 second to avoid re-reading the last record, outputs the watermark value via `mssparkutils.notebook.exit()` |
+| 2 | **copy servicenow tables** (Copy Activity) | Copies rows from ServiceNow where `sys_updated_on >= watermark`, upserts into the Lakehouse on `sys_id` |
+
+> **Key insight:** There is no separate watermark tracking table. The watermark is derived directly from the data — `MAX(sys_updated_on)` on the target table. This is simpler and self-maintaining.
 
 ---
 
@@ -60,14 +62,27 @@ This repo is one of two ServiceNow ingestion patterns. For the companion approac
 
 | Feature | This Repo (Notebook + Copy Activity) | Companion Repo (SQL Database + Copy Activity) |
 |---|---|---|
-| **Watermark storage** | Lakehouse Delta table | Fabric SQL Database |
+| **Watermark storage** | Derived from data table (`MAX(sys_updated_on)`) | Fabric SQL Database |
 | **Watermark logic** | PySpark Notebook | Lookup + Stored Procedure |
 | **Data movement** | Copy Activity (ServiceNow V2 connector) | Copy Activity (ServiceNow V2 connector) |
 | **Activities per table** | 2 (Notebook → Copy) | 3 (Lookup → Copy → Stored Procedure) |
 | **Extra infrastructure** | None | SQL Database + stored procedure |
+| **Separate watermark table** | No — reads directly from data | Yes — `watermark_tracking` table |
 | **Customization** | Notebook code — fully extensible | Pipeline expressions only |
-| **Compute** | Spark session (~58s startup) + pipeline runtime | Pipeline runtime only |
+| **Compute** | Spark session + pipeline runtime | Pipeline runtime only |
 | **Best for** | Teams comfortable with PySpark, want extensibility | Teams wanting pure low-code, fastest execution |
+
+---
+
+## What's in This Repo
+
+The `notebook-implementation` branch contains Fabric Git Integration exports:
+
+| Folder | Fabric Item | Purpose |
+|---|---|---|
+| `USECASE-2-notebook-watermark-tracker.Notebook/` | Notebook | Reads watermark from data table, outputs to pipeline |
+| `USECASE-2-ServiceNow-Notebook-Ingestion.DataPipeline/` | Data Pipeline | ForEach → Notebook → Copy Activity |
+| `servicenow_lakehouse_notebook_incremental_refresh_use_case.Lakehouse/` | Lakehouse | Stores ingested ServiceNow data |
 
 ---
 
@@ -75,8 +90,8 @@ This repo is one of two ServiceNow ingestion patterns. For the companion approac
 
 | Requirement | Details |
 |---|---|
-| **Fabric workspace** | With F64 or higher capacity attached |
-| **Fabric Lakehouse** | Will be created during setup (e.g., `servicenow_data`) |
+| **Fabric workspace** | With Fabric capacity attached (F2 or higher; trial capacity also works) |
+| **Fabric Lakehouse** | Created during setup or imported via Git Integration |
 | **ServiceNow instance** | Developer or production instance with REST API access |
 | **ServiceNow auth** | Service account with Basic authentication |
 | **Workspace role** | Contributor or higher |
@@ -91,106 +106,68 @@ This repo is one of two ServiceNow ingestion patterns. For the companion approac
 > 3. Create the data pipeline with ForEach → Notebook → Copy Activity
 > 4. Create the ServiceNow connection
 > 5. Test the pipeline
+>
+> **Or** connect your Fabric workspace to the `notebook-implementation` branch via Git Integration to import all items at once.
 
 ### Step 1: Create a Fabric workspace and Lakehouse
 
 1. Go to [app.fabric.microsoft.com](https://app.fabric.microsoft.com) → **Workspaces** → **+ New workspace**
 2. Name it (e.g., `ServiceNow-Notebook-Ingestion`)
-3. Assign a Fabric capacity (F64 or higher)
+3. Assign a Fabric capacity (F2 or higher; trial capacity also works)
 4. Inside the workspace, click **+ New item** → **Lakehouse** → name it `servicenow_data`
 
 ### Step 2: Create the watermark notebook
 
-The notebook handles reading and updating watermarks in a Lakehouse Delta table.
+The notebook derives the watermark from the data table itself — no separate tracking table needed.
 
 1. In the workspace, click **+ New item** → **Notebook**
-2. Name it `watermark-check`
-3. Attach it to the `servicenow_data` Lakehouse (click **Lakehouses** in the left panel → **Add** → select `servicenow_data`)
+2. Name it `USECASE-2-notebook-watermark-tracker`
+3. Attach it to your Lakehouse (click **Lakehouses** in the left panel → **Add** → select your Lakehouse)
 4. Add the following cells:
 
 #### Cell 1 — Parameters
 
 ```python
-# Parameters (overridden by pipeline)
+# Parameter injected by the pipeline ForEach activity
 table_name = "incident"
 ```
 
-> **Note:** When triggered by the pipeline, `table_name` is automatically set to the current table from the ForEach loop.
+> **Note:** When triggered by the pipeline, `table_name` is overridden by the Notebook activity's base parameter (`@item().tableName`). The `"incident"` default here is used when running the notebook interactively for testing.
+>
+> **If you import via Git Integration:** The exported pipeline JSON does not include the notebook base parameter mapping. After import, open the Notebook activity → **Settings** → **Base parameters** and add: Name = `table_name`, Type = String, Value = `@item().tableName`.
 
-#### Cell 2 — Read watermark from Lakehouse
+#### Cell 2 — Read watermark and output to pipeline
 
 ```python
-from pyspark.sql import SparkSession
+from datetime import datetime, timedelta
 
-spark = SparkSession.builder.getOrCreate()
-
-# Read current watermark for this table
 try:
-    watermark_df = spark.sql(f"""
-        SELECT watermark_value 
-        FROM watermark_tracking 
-        WHERE table_name = '{table_name}'
-    """)
-    if watermark_df.count() > 0:
-        watermark = watermark_df.collect()[0]["watermark_value"]
-    else:
-        watermark = "1970-01-01 00:00:00"
+    df = spark.sql(f"SELECT MAX(sys_updated_on) AS watermark FROM servicenow_data.{table_name}")
+    watermark = df.collect()[0]["watermark"]
 except Exception:
-    # Table doesn't exist yet (first run)
+    watermark = None
+
+if watermark is None:
     watermark = "1970-01-01 00:00:00"
-
-print(f"Table: {table_name}, Watermark: {watermark}")
-```
-
-#### Cell 3 — Output watermark for Copy Activity
-
-```python
-# Output the watermark value so the pipeline can use it
-# The Copy Activity references this via: @activity('watermark check').output.result.exitValue
-from notebookutils import mssparkutils
-
-mssparkutils.notebook.exit(watermark)
-```
-
-#### Cell 4 — Update watermark after successful copy
-
-> **Important:** This cell should be called *after* the Copy Activity succeeds. You can either:
-> - Include the update logic in this notebook and call it a second time with a "mode" parameter, or
-> - Create a separate small notebook for the watermark update step
-
-```python
-from datetime import datetime
-from pyspark.sql.types import StructType, StructField, StringType
-from delta.tables import DeltaTable
-
-new_watermark = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-watermark_data = [(table_name, new_watermark)]
-watermark_schema = StructType([
-    StructField("table_name", StringType(), False),
-    StructField("watermark_value", StringType(), False)
-])
-new_watermark_df = spark.createDataFrame(watermark_data, watermark_schema)
-
-if spark.catalog.tableExists("watermark_tracking"):
-    delta_wm = DeltaTable.forName(spark, "watermark_tracking")
-    delta_wm.alias("target").merge(
-        new_watermark_df.alias("source"),
-        "target.table_name = source.table_name"
-    ).whenMatchedUpdate(
-        set={"watermark_value": "source.watermark_value"}
-    ).whenNotMatchedInsertAll(
-    ).execute()
 else:
-    new_watermark_df.write.format("delta").saveAsTable("watermark_tracking")
+    # Add 1 second to avoid re-reading the last record due to sub-second precision
+    dt = datetime.strptime(str(watermark)[:19], "%Y-%m-%d %H:%M:%S")
+    watermark = (dt + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
-print(f"Watermark updated: {table_name} → {new_watermark}")
+mssparkutils.notebook.exit(str(watermark))
 ```
+
+> **How it works:**
+> - Queries `MAX(sys_updated_on)` from the Lakehouse data table (e.g., `incident`)
+> - If the table doesn't exist yet (first run), defaults to `1970-01-01 00:00:00` (full load)
+> - Adds +1 second to the watermark to prevent re-reading the last ingested record
+> - Outputs the watermark via `mssparkutils.notebook.exit()` so the Copy Activity can use it
+> - The Copy Activity reads the value with: `@activity('watermark check').output.result.exitValue`
 
 ### Step 3: Create the data pipeline
 
 1. In the workspace, click **+ New item** → **Data Pipeline**
-2. Name it `ServiceNow-Notebook-Ingestion`
+2. Name it `USECASE-2-ServiceNow-Notebook-Ingestion`
 
 #### Add the pipeline parameter
 
@@ -210,7 +187,7 @@ print(f"Watermark updated: {table_name} → {new_watermark}")
 1. Drag a **Notebook** activity onto the ForEach canvas
 2. Name it `watermark check`
 3. **Settings**:
-   - Notebook: select `watermark-check`
+   - Notebook: select `USECASE-2-notebook-watermark-tracker`
    - Base parameters → **+ New**:
      - Name: `table_name`
      - Type: String
@@ -220,17 +197,17 @@ print(f"Watermark updated: {table_name} → {new_watermark}")
 
 1. Drag a **Copy Data** activity onto the ForEach canvas
 2. Name it `copy servicenow tables`
-3. Connect `watermark check` → `copy servicenow tables` (drag the green arrow)
+3. Connect `watermark check` → `copy servicenow tables` (drag the green **Succeeded** arrow)
 4. **Source** tab:
    - Connection: Create or select your ServiceNow connection
-   - Table: select `incident` (will be overridden by expression)
+   - Table: select `incident`
    - Filter: Add a filter expression for incremental:
      - Field: `sys_updated_on`
      - Operator: `>=`
      - Value: `@activity('watermark check').output.result.exitValue`
 5. **Destination** tab:
-   - Connection: select your `servicenow_data` Lakehouse
-   - Table: `@item().tableName`
+   - Connection: select your Lakehouse
+   - Table: `@{item().tableName}`
    - Table action: **Upsert**
    - Key columns: `sys_id`
 
@@ -243,64 +220,26 @@ print(f"Watermark updated: {table_name} → {new_watermark}")
 |---|---|
 | **Connection name** | `ServiceNow-Connection` |
 | **Server URL** | `https://<your-instance>.service-now.com` |
-| **Authentication** | Basic |
+| **Authentication** | Basic (or OAuth 2.0 if supported by your instance) |
 | **Username** | Your ServiceNow service account |
 | **Password** | Service account password |
 
+> **Security best practice:** Avoid storing credentials directly. If your Fabric workspace supports it, use **Azure Key Vault** to store the ServiceNow password and reference it in the connection. For production workloads, prefer **OAuth 2.0** authentication over Basic auth when your ServiceNow instance supports it.
+
 ### Step 5: Test
 
-1. First, initialize the watermark table by running the notebook manually once
-2. Click **Run** on the pipeline
-3. First run → full load (all rows from ServiceNow)
-4. Second run → **0 rows copied** (incremental working)
-5. Update a record in ServiceNow → third run picks up the changed row
-
----
-
-## Initialize the Watermark Table
-
-Before the first pipeline run, create the watermark tracking table. Run this in a notebook cell:
-
-```python
-from pyspark.sql.types import StructType, StructField, StringType
-
-schema = StructType([
-    StructField("table_name", StringType(), False),
-    StructField("watermark_value", StringType(), False)
-])
-
-initial_data = [("incident", "1970-01-01 00:00:00")]
-df = spark.createDataFrame(initial_data, schema)
-df.write.format("delta").saveAsTable("watermark_tracking")
-```
+1. Click **Run** on the pipeline
+2. First run → full load (all rows from ServiceNow, since watermark defaults to `1970-01-01`)
+3. Second run → **0 rows copied** (incremental working — watermark is now set to latest `sys_updated_on`)
+4. Update a record in ServiceNow → third run picks up the changed row
 
 ---
 
 ## Scaling to Multiple Tables
 
-### 1. Seed additional watermarks
+### 1. Update the pipeline parameter
 
-```python
-from pyspark.sql.types import StructType, StructField, StringType
-
-new_tables = [
-    ("change_request",  "1970-01-01 00:00:00"),
-    ("cmdb_ci_server",  "1970-01-01 00:00:00"),
-    ("sc_request",      "1970-01-01 00:00:00"),
-    ("sys_user",        "1970-01-01 00:00:00"),
-    ("problem",         "1970-01-01 00:00:00"),
-]
-
-schema = StructType([
-    StructField("table_name", StringType(), False),
-    StructField("watermark_value", StringType(), False)
-])
-
-df = spark.createDataFrame(new_tables, schema)
-df.write.format("delta").mode("append").saveAsTable("watermark_tracking")
-```
-
-### 2. Update the pipeline parameter
+No seeding needed — the notebook auto-detects if the table exists. If it doesn't, it returns `1970-01-01 00:00:00` for a full load.
 
 ```json
 [
@@ -311,6 +250,15 @@ df.write.format("delta").mode("append").saveAsTable("watermark_tracking")
 ]
 ```
 
+### 2. Update the Copy Activity source table
+
+The exported pipeline has the source table hardcoded to `incident`. For multi-table support, you need to parameterize the source:
+
+1. Open the Copy Activity → **Source** tab
+2. Switch the table selection to use dynamic content: `@item().tableName`
+
+> **Note:** Depending on your ServiceNow connector version, you may need to edit the pipeline JSON directly to replace the hardcoded `"tableName": "incident"` with `"tableName": "@{item().tableName}"`.
+
 ### 3. Run
 
 The ForEach executes all tables in parallel by default. Each table runs its own Notebook → Copy Activity chain independently.
@@ -319,14 +267,21 @@ The ForEach executes all tables in parallel by default. Each table runs its own 
 
 ## Key Design Decisions
 
+### Why derive watermark from the data table?
+
+Instead of maintaining a separate `watermark_tracking` table, the notebook reads `MAX(sys_updated_on)` directly from the target table. This means:
+- **No initialization step** — first run auto-detects an empty/missing table and does a full load
+- **Self-maintaining** — the watermark always reflects the actual data
+- **No drift** — impossible for the watermark table to get out of sync with the data
+
+### Why +1 second offset?
+
+ServiceNow timestamps can have sub-second precision that gets truncated. Adding 1 second to the watermark prevents re-reading the last record on every run.
+
 ### Why Notebook + Copy Activity (hybrid)?
 
-- **Notebook for watermarks** — The Lakehouse Lookup activity only supports Table mode (T-SQL Query is greyed out), so you can't run parameterized watermark queries with a Lookup. The notebook gives full Spark SQL access to read/write watermarks from a Delta table.
+- **Notebook for watermark** — The Lakehouse Lookup activity only supports Table mode (T-SQL Query is greyed out), so you can't run `MAX(sys_updated_on)` with a Lookup. The notebook gives full Spark SQL access.
 - **Copy Activity for data** — The native ServiceNow V2 connector handles authentication, pagination, and schema mapping automatically. No need to reimplement REST API calls in PySpark.
-
-### Why not a SQL Database for watermarks?
-
-This pattern keeps everything in the Lakehouse — no extra SQL Database to provision, no stored procedures to maintain. The trade-off is Spark session startup time (~58s vs. ~instant for a SQL Lookup).
 
 ### Why Upsert on sys_id?
 
@@ -354,40 +309,32 @@ Add a schedule trigger in the pipeline toolbar:
 
 | Issue | Fix |
 |---|---|
-| Notebook output not accessible by Copy Activity | Use `mssparkutils.notebook.exit(watermark)` — Copy reads via `@activity('watermark check').output.result.exitValue` |
+| Notebook output not accessible by Copy Activity | Ensure the notebook uses `mssparkutils.notebook.exit(watermark)` — Copy reads via `@activity('watermark check').output.result.exitValue` |
 | Lakehouse Lookup query greyed out | This is why we use a Notebook instead of a Lookup for watermark reads |
-| Copy reads all rows every run | Verify Source filter uses the notebook output watermark expression |
-| Spark session slow to start | Normal — first cell takes 30–60s for Spark initialization |
+| Copy reads all rows every run | Verify Source filter uses `@activity('watermark check').output.result.exitValue` as the value |
+| Spark session slow to start | Normal — first notebook cell takes 30–60s for Spark initialization |
 | Duplicate records | Ensure Destination table action is **Upsert** with key column `sys_id` |
-| Watermark table doesn't exist | Run the initialization cell manually before the first pipeline run |
+| First run copies everything | Expected — the table doesn't exist yet, so watermark defaults to `1970-01-01` |
 | ServiceNow connection fails | Check URL format (`https://<instance>.service-now.com`), auth type (Basic), account not locked |
-| `InvalidTemplate` / `firstRow` doesn't exist | This error occurs with the SQL Database Lookup approach — not applicable to this notebook pattern |
 
 ---
 
 ## Useful Commands
 
 ```python
-# Check all watermarks
-display(spark.sql("SELECT * FROM watermark_tracking ORDER BY watermark_value DESC"))
-
-# Reset a single table watermark (triggers full reload)
-spark.sql("""
-    UPDATE watermark_tracking 
-    SET watermark_value = '1970-01-01 00:00:00' 
-    WHERE table_name = 'incident'
-""")
-
-# Reset all watermarks
-spark.sql("UPDATE watermark_tracking SET watermark_value = '1970-01-01 00:00:00'")
+# Check the current watermark for a table (latest sys_updated_on)
+display(spark.sql("SELECT MAX(sys_updated_on) AS watermark FROM servicenow_data.incident"))
 
 # Check row counts per table
 for table in ["incident", "change_request", "cmdb_ci_server"]:
     try:
-        count = spark.sql(f"SELECT COUNT(*) as cnt FROM {table}").collect()[0]["cnt"]
+        count = spark.sql(f"SELECT COUNT(*) as cnt FROM servicenow_data.{table}").collect()[0]["cnt"]
         print(f"{table}: {count} rows")
     except:
         print(f"{table}: not yet created")
+
+# Preview recent records
+display(spark.sql("SELECT sys_id, sys_updated_on FROM servicenow_data.incident ORDER BY sys_updated_on DESC LIMIT 10"))
 ```
 
 ---
@@ -397,7 +344,3 @@ for table in ["incident", "change_request", "cmdb_ci_server"]:
 - **SQL Database watermark approach (3 native activities, no notebooks):** [fabric-pipeline-servicenow-incremental-refresh](https://github.com/claraworkman/fabric-pipeline-servicenow-incremental-refresh)
 
 ---
-
-## License
-
-This project is provided as-is for demonstration and deployment purposes.
