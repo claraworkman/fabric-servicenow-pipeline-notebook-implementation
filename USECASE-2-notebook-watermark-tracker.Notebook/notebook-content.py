@@ -8,29 +8,22 @@
 # META   },
 # META   "dependencies": {
 # META     "lakehouse": {
-# META       "default_lakehouse": "04440b2f-5b2d-4c7c-99ab-3261eb36365b",
-# META       "default_lakehouse_name": "servicenow_data",
-# META       "default_lakehouse_workspace_id": "30b4a580-14af-4752-8037-254926ff6c2c",
+# META       "default_lakehouse": "c9c5a760-852c-4463-86f4-e3f123d7581c",
+# META       "default_lakehouse_name": "servicenow_lakehouse",
+# META       "default_lakehouse_workspace_id": "770909c8-52d5-443e-a0ca-4712cfa36884",
 # META       "known_lakehouses": [
 # META         {
-# META           "id": "04440b2f-5b2d-4c7c-99ab-3261eb36365b"
+# META           "id": "c9c5a760-852c-4463-86f4-e3f123d7581c"
 # META         }
 # META       ]
 # META     }
 # META   }
 # META }
 
-# CELL ********************
+# MARKDOWN ********************
 
-# ServiceNow Watermark Check
-#Queries the Lakehouse table for the maximum `sys_updated_on` value and returns it to the pipeline.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
+# # ServiceNow Watermark Check
+# ### Queries the Lakehouse table for the maximum `sys_updated_on` value and returns it to the pipeline.
 
 # CELL ********************
 
@@ -46,22 +39,17 @@ table_name = "incident"
 
 # CELL ********************
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
-try:
-    df = spark.sql(f"SELECT MAX(sys_updated_on) AS watermark FROM servicenow_data.{table_name}")
-    watermark = df.collect()[0]["watermark"]
-except:
-    watermark = None
+df = spark.sql(f"SELECT MAX(sys_updated_on) AS watermark FROM {table_name}")
+watermark = df.collect()[0]["watermark"]
 
 if watermark is None:
-    watermark = "1970-01-01 00:00:00"
+    result = "1970-01-01 00:00:00"
 else:
-    # Add 1 second to avoid re-reading the last record due to sub-second precision
-    dt = datetime.strptime(str(watermark)[:19], "%Y-%m-%d %H:%M:%S")
-    watermark = (dt + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    result = str(watermark)
 
-mssparkutils.notebook.exit(str(watermark))
+mssparkutils.notebook.exit(result)
 
 # METADATA ********************
 
