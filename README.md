@@ -333,3 +333,5 @@ display(spark.sql("SELECT sys_id, sys_updated_on FROM incident ORDER BY sys_upda
 - **SQL Database watermark approach (3 native activities, no notebooks):** [fabric-pipeline-servicenow-incremental-refresh](https://github.com/claraworkman/fabric-pipeline-servicenow-incremental-refresh)
 
 ---
+
+Disclaimer: The attached diagrams and code are provided AS IS without warranty of any kind and should not be interpreted as an offer or commitment on the part of Microsoft, and Microsoft cannot guarantee the accuracy of any information presented. MICROSOFT MAKES NO WARRANTIES, EXPRESS OR IMPLIED, IN THIS DIAGRAM(s) CODE SAMPLE(s).
